@@ -41,18 +41,15 @@ HTTP/1.1 301 Moved Permanently...
 >>> p   = subprocess.Popen(c, stdin = f1)
 >>> s   = sys.stdin; sys.stdin = f2
 >>> time.sleep(1)
->>> def killer(p):
-...   time.sleep(1)
-...   p.terminate()
+>>> def killer(p): time.sleep(1); p.terminate()
 >>> threading.Thread(target = killer, args = [p]).start()
 
->>> N.client("localhost", port1)                  # doctest: +ELLIPSIS
+>>> N.client("localhost", port1)
 Hi!
 
 >>> sys.stdin = s
 
 
-# TODO
 >>> c   = [sys.executable, "netcat.py", "-u", "-l", "-p", str(port2)]
 >>> f1  = tempfile.TemporaryFile(); f2 = tempfile.TemporaryFile()
 >>> _   = f1.write(b"Hi!\n") ; _ = f1.seek(0)
@@ -60,11 +57,12 @@ Hi!
 >>> p   = subprocess.Popen(c, stdin = f1, stdout = subprocess.PIPE)
 >>> s   = sys.stdin; sys.stdin = f2
 >>> time.sleep(1)
->>> def killer(p):
-...   time.sleep(2); p.stdout.readline(); p.terminate()
->>> threading.Thread(target = killer, args = [p]).start()
+>>> def killer(p, f2):
+...   time.sleep(1); p.terminate()
+...   with N.handle_io.lock: f2.close()
+>>> threading.Thread(target = killer, args = [p, f2]).start()
 
->>> N.client("localhost", port2, True)            # doctest: +ELLIPSIS
+>>> N.client("localhost", port2, udp = True)
 Hi!
 
 >>> sys.stdin = s
@@ -73,7 +71,7 @@ Hi!
 
 from __future__ import print_function
 
-import argparse, fcntl, os, select, sys
+import argparse, fcntl, os, select, sys, threading
 import socket as S
 
 if sys.version_info.major == 2:                                 # {{{1
@@ -149,7 +147,8 @@ def argument_parser():                                          # {{{1
                  help = "UDP mode (default is TCP)")
   p.add_argument("--listen", "-l", action = "store_true",
                  help = "listen mode, for inbound connects")
-  p.add_argument("--port", "-p", type = int, dest="lport",
+  p.add_argument("--port", "-p", type = int,
+                 dest = "lport", metavar = "PORT",
                  help = "local port number")
   p.add_argument("--test", action = "store_true",
                  help = "run tests (not netcat)")
@@ -169,14 +168,13 @@ def argument_parser():                                          # {{{1
 
 def client(host, port, udp = False):
   """connect std{in,out} to TCP (or UDP) socket (client)"""
-
   set_nonblocking(sys.stdin.fileno())
   sock = create_socket(udp)
   if not udp:
     sock.connect((host, port))
   handle_io(sock, udp = udp, addr = (host, port))
 
-def server(port, udp = False):
+def server(port, udp = False):                                  # {{{1
   """connect std{in,out} to TCP (or UDP) socket (server)"""
 
   set_nonblocking(sys.stdin.fileno())
@@ -187,6 +185,7 @@ def server(port, udp = False):
     handle_io(clientsock)
   else:
     handle_io(sock, udp = True)
+                                                                # }}}1
 
 def create_socket(udp = False):
   return S.socket(S.AF_INET, S.SOCK_DGRAM if udp else S.SOCK_STREAM)
@@ -195,23 +194,31 @@ def handle_io(sock, udp = False, addr = None):                  # {{{1
   """handle I/O"""
   try:
     while True:
-      sin = [sock, sys.stdin] if not udp or addr else [sock]
-      rs, _, _ = select.select(sin, [], [])
-      if sock in rs:
-        data, addr = sock.recvfrom(4096)
-        if not data: break  # socket is closed
-        binwrite(sys.stdout, data)
-        sys.stdout.flush()
-      if sys.stdin in rs:
-        data = binread(sys.stdin, 4096)
-        if udp:
-          sock.sendto(data, addr)
-        else:
-          sock.sendall(data)
-
+      with handle_io.lock:
+        sin       = [sock, sys.stdin] if (not udp or addr) \
+                    and not sys.stdin.closed else [sock]
+      rs, _, _  = select.select(sin, [], [])
+      with handle_io.lock:
+        if sock in rs:
+          data, addr = sock.recvfrom(4096)
+          if not data: return CLOSED_SOCK
+          binwrite(sys.stdout, data)
+          sys.stdout.flush()
+        if sys.stdin in rs:
+          if sys.stdin.closed: return CLOSED_STDIN
+          data = binread(sys.stdin, 4096)
+          if udp:
+            sock.sendto(data, addr)
+          else:
+            sock.sendall(data)
   finally:
     sock.close()
                                                                 # }}}1
+
+handle_io.lock = threading.Lock()
+
+CLOSED_SOCK, CLOSED_STDIN = \
+  "__CLOSED_SOCK__ __CLOSED_STDIN__".split()
 
 def set_nonblocking(fd):
   """make fd non-blocking."""
