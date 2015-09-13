@@ -211,7 +211,9 @@ def server(port, udp = False, term = None, io = None):          # {{{1
   """connect std{in,out} to TCP (or UDP) socket (server)"""
 
   set_nonblocking(get_io(io)[0].fileno())
-  sock = create_socket(udp); sock.bind(('', port))
+  sock = create_socket(udp)
+  sock.setsockopt(S.SOL_SOCKET, S.SO_REUSEADDR, 1)
+  sock.bind(('', port))
   if not udp:
     sock.listen(1); clientsock, addr = sock.accept()
     handle_io(clientsock, term = term, io = io)
@@ -220,9 +222,7 @@ def server(port, udp = False, term = None, io = None):          # {{{1
                                                                 # }}}1
 
 def create_socket(udp = False):
-  sock = S.socket(S.AF_INET, S.SOCK_DGRAM if udp else S.SOCK_STREAM)
-  sock.setsockopt(S.SOL_SOCKET, S.SO_REUSEADDR, 1)
-  return sock
+  return S.socket(S.AF_INET, S.SOCK_DGRAM if udp else S.SOCK_STREAM)
 
 def handle_io(sock, udp = False, addr = None, term = None,      # {{{1
               io = None):
